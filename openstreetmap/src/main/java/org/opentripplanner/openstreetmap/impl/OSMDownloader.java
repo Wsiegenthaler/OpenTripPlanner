@@ -29,11 +29,11 @@ import com.vividsolutions.jts.geom.Envelope;
 public class OSMDownloader {
     private static final Logger _log = LoggerFactory.getLogger(OSMDownloader.class);
 
-    private double _latYStep = 0.04;
+    private double _latYStep = 0.1;
 
-    private double _lonXStep = 0.04;
+    private double _lonXStep = 0.1;
 
-    private double _overlap = 0.001;
+    private double _overlap = 0.005;
 
     private File _cacheDirectory;
 
