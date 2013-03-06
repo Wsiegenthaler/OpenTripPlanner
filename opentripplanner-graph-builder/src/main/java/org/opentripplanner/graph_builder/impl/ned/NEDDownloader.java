@@ -79,9 +79,9 @@ public class NEDDownloader implements NEDTileSource {
 
     static String dataset = "ND302XZ"; // 1/3 arcsecond data.
     
-    private double _latYStep = 0.16;
+    private double _latYStep = 0.25;
 
-    private double _lonXStep = 0.16;
+    private double _lonXStep = 0.25;
 
     @Override
     public void setGraph(Graph graph) {
@@ -168,7 +168,7 @@ public class NEDDownloader implements NEDTileSource {
 
         try {
             for (String payload : payloads) {
-                sleep(2000);
+                sleep(1000);
 
                 Service RTservice = new Service();
                 Call RTcall = (Call) RTservice.createCall();
@@ -343,16 +343,16 @@ public class NEDDownloader implements NEDTileSource {
             }
             try {
                 while (true) {
-                    sleep(3000);
+                    sleep(2000);
                     String token;
                     while (true) {
                         token = initiateDownload(url);
                         int i = 0;
                         do {
                             log.debug("Waiting to query");
-                            sleep(30000);
+                            sleep(15000);
                         } while (!downloadReady(token) && i++ < 20);
-                        sleep(3000);
+                        sleep(2000);
                         if (i != 20) {
                             break;
                         }
