@@ -26,6 +26,10 @@ import java.util.Map;
 
 import lombok.Setter;
 
+import com.twitter.scalding.*;
+import cascading.flow.Flow;
+import org.apache.hadoop.conf.Configuration;
+
 import org.onebusaway.csv_entities.EntityHandler;
 import org.onebusaway.gtfs.impl.GtfsRelationalDaoImpl;
 import org.onebusaway.gtfs.impl.calendar.CalendarServiceDataFactoryImpl;
@@ -39,6 +43,7 @@ import org.onebusaway.gtfs.services.GenericMutableDao;
 import org.onebusaway.gtfs.services.GtfsMutableRelationalDao;
 import org.opentripplanner.calendar.impl.MultiCalendarServiceImpl;
 import org.opentripplanner.gbannotation.AgencyNameCollision;
+import org.opentripplanner.graph_builder.GraphBuilderJob;
 import org.opentripplanner.graph_builder.model.GtfsBundle;
 import org.opentripplanner.graph_builder.model.GtfsBundles;
 import org.opentripplanner.graph_builder.services.EntityReplacementStrategy;
@@ -77,17 +82,20 @@ public class GtfsGraphBuilderImpl implements GraphBuilder {
 
     private List<GraphBuilderWithGtfsDao> gtfsGraphBuilders;
 
-    EntityHandler counter = new EntityCounter();
-
-    private FareServiceFactory _fareServiceFactory;
-
     /** will be applied to all bundles which do not have the cacheDirectory property set */
-    @Setter private File cacheDirectory; 
+    @Setter private File cacheDirectory;
     
     /** will be applied to all bundles which do not have the useCached property set */
-    @Setter private Boolean useCached; 
+    @Setter private Boolean useCached;
 
+    @Setter private Boolean scaldingLocalMode;
+    @Setter private Boolean scaldingUseHdfs;
+    @Setter private Map<String, String> scaldingConfig;
+
+    // TODO inline this state into the computation
     Map<Agency, GtfsBundle> agenciesSeen = new HashMap<Agency, GtfsBundle>();
+    private FareServiceFactory _fareServiceFactory;
+    EntityHandler counter = new EntityCounter();
 
     private boolean generateFeedIds = false;
 
@@ -130,18 +138,63 @@ public class GtfsGraphBuilderImpl implements GraphBuilder {
     @Override
     public void buildGraph(Graph graph, HashMap<Class<?>, Object> extra) {
 
+        /* Apply global defaults to individual GTFSBundles (if globals have been set) */
+        for (GtfsBundle gtfsBundle : _gtfsBundles.getBundles()) {
+            Boolean globalCacheDirIsSet = (cacheDirectory != null);
+            Boolean bundleCacheDirIsSet = (gtfsBundle.getCacheDirectory() != null);
+            if (globalCacheDirIsSet && !bundleCacheDirIsSet)
+                gtfsBundle.setCacheDirectory(cacheDirectory);
+            Boolean useCacheIsSet = (useCached != null && useCached);
+            if (useCacheIsSet && gtfsBundle.getUseCached() == null)
+                gtfsBundle.setUseCached(useCached);
+        }
+
+        /* Determine the job mode */
+        Mode jobMode = new Local(false);
+        if (!scaldingLocalMode) {
+            Configuration conf = new Configuration(false);
+            for (Map.Entry<String, String> entry : scaldingConfig.entrySet()) {
+                conf.set(entry.getKey(), entry.getValue());
+            }
+            jobMode = new Hdfs(false, conf);
+        }
+        Mode$.MODULE$.mode_$eq(jobMode);
+
+        /* Use HDFS or the local filesystem? */
+        String cacheDirUri = cacheDirectory.getPath();
+        if (!scaldingLocalMode || scaldingUseHdfs) {
+            // Either running with hadoop or the HDFS override was set -> use HDFS
+            cacheDirUri = scaldingConfig.get("fs.default.name").concat(cacheDirUri);
+        } else {
+            // Running locally -> use local filesystem
+            cacheDirUri = "file:/".concat(cacheDirUri);
+        }
+
+        /* Setup and run our job */
+        GraphBuilderJob job = new GraphBuilderJob(cacheDirUri, _gtfsBundles);
+        Flow flow = job.buildFlow();
+        flow.writeDOT("GraphBuilderFlow.dot");
+        flow.complete();
+
+
+
         MultiCalendarServiceImpl service = new MultiCalendarServiceImpl();
         GtfsStopContext stopContext = new GtfsStopContext();
         
-        try {
             int bundleIndex = 0;
             for (GtfsBundle gtfsBundle : _gtfsBundles.getBundles()) {
+              try {
                 bundleIndex += 1;
-                // apply global defaults to individual GTFSBundles (if globals have been set) 
-                if (cacheDirectory != null && gtfsBundle.getCacheDirectory() == null)
-                    gtfsBundle.setCacheDirectory(cacheDirectory);
-                if (useCached != null && gtfsBundle.getUseCached() == null)
-                    gtfsBundle.setUseCached(useCached);
+                // apply global defaults to individual GTFSBundles (if globals have been set)
+//                Boolean cacheDirIsSet = (cacheDirectory != null);
+//                Boolean bundleCacheDirIsSet = (gtfsBundle.getCacheDirectory() != null);
+//                if (cacheDirIsSet && !bundleCacheDirIsSet)
+//                  gtfsBundle.setCacheDirectory(cacheDirectory);
+//
+//                Boolean useCacheIsSet = (useCached != null && useCached);
+//                if (useCacheIsSet && gtfsBundle.getUseCached() == null)
+//                  gtfsBundle.setUseCached(useCached);
+
                 GtfsMutableRelationalDao dao = new GtfsRelationalDaoImpl();
                 GtfsContext context = GtfsLibrary.createContext(dao, service);
                 GTFSPatternHopFactory hf = new GTFSPatternHopFactory(context);
@@ -174,9 +227,13 @@ public class GtfsGraphBuilderImpl implements GraphBuilder {
                         builder.setDao(null); // clean up
                     }
                 }
-            }
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+          } catch (Exception e) {
+              _log.error("Error processing Gtfs feed: ", e);
+              //throw new RuntimeException(e);
+          }
+
+          // Very memory intensive.  Request gc after loading each transit authority.
+          System.gc();
         }
 
         // We need to save the calendar service data so we can use it later
@@ -206,12 +263,14 @@ public class GtfsGraphBuilderImpl implements GraphBuilder {
         if (gtfsBundle.getDefaultAgencyId() != null)
             reader.setDefaultAgencyId(gtfsBundle.getDefaultAgencyId());
 
+        // Be sure to map agencyIds from graph-builder.xml.  NOT USED?
         for (Map.Entry<String, String> entry : gtfsBundle.getAgencyIdMappings().entrySet())
             reader.addAgencyIdMapping(entry.getKey(), entry.getValue());
 
-        if (_log.isDebugEnabled())
-            reader.addEntityHandler(counter);
+        //INFO if (_log.isDebugEnabled())
+        //    reader.addEntityHandler(counter);
 
+        // Do something to gtfs if bikes are allowed
         if (gtfsBundle.getDefaultBikesAllowed())
             reader.addEntityHandler(new EntityBikeability(true));
 
@@ -367,9 +426,20 @@ public class GtfsGraphBuilderImpl implements GraphBuilder {
 
     @Override
     public void checkInputs() {
-        for (GtfsBundle bundle : _gtfsBundles.getBundles()) {
-            bundle.checkInputs();
-        }
+      // TEMPORARILY DISABLED -> The GtfsExchangeBundles component grabs urls from http://www.gtfs-exchange.com which doesn't support HEAD.
+      //  List<GtfsBundle> bundles = _gtfsBundles.getBundles();
+      //  List<GtfsBundle> badBundles = new ArrayList<GtfsBundle>();
+      //  for (GtfsBundle bundle : bundles) {
+      //    try {
+      //      bundle.checkInputs();
+      //    } catch (Exception e) {
+      //      _log.error("GtfsBundle did not pass the input test: " + bundle.toString(), e);
+      //      badBundles.add(bundle);
+      //    }
+      //  }
+      //  for (GtfsBundle toRemove : badBundles) {
+      //    bundles.remove(toRemove);
+      //  }
     }
 
     public void setGenerateFeedIds(boolean generateFeedIds) {

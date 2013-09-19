@@ -187,6 +187,7 @@ public class GtfsBundle {
             try {
                 HttpUtils.testUrl(url.toExternalForm());
             } catch (ClientProtocolException e) {
+                _log.warn("Could not retrieve GTFS file from url, skipping: " + url);
                 throw new RuntimeException(e);
             } catch (IOException e) {
                 throw new RuntimeException(e);
